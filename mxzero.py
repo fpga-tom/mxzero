@@ -257,8 +257,8 @@ def make_board_game_config(action_space_size: int, max_moves: int,
       max_moves=max_moves,
       discount=1.0,
       dirichlet_alpha=dirichlet_alpha,
-      num_simulations=400,
-      batch_size=64,
+      num_simulations=100,
+      batch_size=128,
       td_steps=max_moves,  # Always use Monte Carlo return.
       num_actors=8,
       lr_init=lr_init,
@@ -400,7 +400,7 @@ class Environment(object):
     self.seq.append(action)
     w = ''.join([string.printable[c] for c in self.seq])
     print(self.seq, w)
-    if action != 0 and self.s.find(str.encode(w)) != -1:
+    if self.s.find(str.encode(w)) != -1:
       print('reward' , 1)
       return 1
     else:
@@ -703,8 +703,11 @@ class Prediction(nn.Block):
         self.value.add(nn.Dense(1))
 
 
+
+
     def forward(self, x):
-        return (self.policy(nd.ndarray.array(x, ctx=self.ctx))), nd.tanh(self.value(nd.ndarray.array(x, ctx=self.ctx)))
+        xx = nd.ndarray.array(x, ctx=self.ctx)
+        return self.policy(xx), nd.tanh(self.value(xx))
 
 
 class Dynamics(nn.Block):
@@ -789,14 +792,21 @@ class Dynamics(nn.Block):
         self.value.add(nn.Dense(params['fc_width']))
         self.value.add(nn.Dense(1))
 
+        self.embedding = nd.random.normal(0, 0.1, shape=[8, Environment.ACTIONS], ctx=self.ctx)
 
-    def forward(self, x):
-        return nd.tanh(self.value(nd.ndarray.array(x, ctx=self.ctx))), nd.softmax(self.policy(nd.ndarray.array(x, ctx=self.ctx)))
+
+    def forward(self, x, action):
+        emb = nd.Embedding(nd.array([action], self.ctx), self.embedding, input_dim=Environment.HISTORY,
+                           output_dim=Environment.ACTIONS)
+        emb = nd.Reshape(emb, [1,1,Environment.ACTIONS,1])
+        xx = nd.ndarray.array(x, ctx=self.ctx)
+        xxc = nd.concat(xx, emb, dim=0)
+        return nd.tanh(self.value(xxc)), (self.policy(xxc))
 
 
 class Network():
 
-    def __init__(self, ctx=cpu(0)):
+    def __init__(self, ctx=get_ctx()):
         self.ctx = ctx
         self.representation = Representation(ctx, FLAGS.flag_values_dict())
         self.dynamics = Dynamics(ctx, FLAGS.flag_values_dict())
@@ -821,7 +831,7 @@ class Network():
 
     def recurrent_inference(self, hidden_state, action) -> NetworkOutput:
         # dynamics + prediction function
-        reward, hidden_state_new = self.dynamics(hidden_state)
+        reward, hidden_state_new = self.dynamics(hidden_state, action)
 
         hidden_state_new = numpy.reshape(hidden_state_new.asnumpy(), [-1, 1, Environment.ACTIONS, 1])
         # print('hidden', numpy.shape(hidden_state_new))
@@ -891,7 +901,7 @@ def muzero(config: MuZeroConfig):
   p = []
   for i in range(config.num_actors):
     print('job ' , i)
-    j = launch_job(run_selfplay, config, storage, replay_buffer)
+    j = launch_job(run_selfplay, config, storage, replay_buffer, i)
     p.append(j)
 
 
@@ -913,7 +923,8 @@ def muzero(config: MuZeroConfig):
 # snapshot, produces a game and makes it available to the training job by
 # writing it to a shared replay buffer.
 def run_selfplay(config: MuZeroConfig, storage: SharedStorage,
-                 replay_buffer: ReplayBuffer):
+                 replay_buffer: ReplayBuffer, tid):
+  numpy.random.seed(tid)
   while True:
     network = storage.latest_network()
     game = play_game(config, network)
@@ -970,7 +981,7 @@ def run_mcts(config: MuZeroConfig, root: Node, action_history: ActionHistory,
     # hidden state given an action and the previous hidden state.
     parent = search_path[-2]
     network_output = network.recurrent_inference(parent.hidden_state,
-                                                 history.last_action())
+                                                 history.last_action().index)
     expand_node(node, history.to_play(), history.action_space(), network_output)
 
     backpropagate(search_path, network_output.value, history.to_play(),
