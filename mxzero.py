@@ -284,7 +284,7 @@ def make_shogi_config() -> MuZeroConfig:
 
 def make_c_config() -> MuZeroConfig:
   return make_board_game_config(
-    action_space_size=Environment.ACTIONS, max_moves=16, dirichlet_alpha=0.15, lr_init=0.1)
+    action_space_size=Environment.ACTIONS, max_moves=16, dirichlet_alpha=0.03, lr_init=0.01)
 
 def make_atari_config() -> MuZeroConfig:
 
@@ -814,6 +814,7 @@ class Network():
         self.representation.initialize(ctx=ctx)
         self.dynamics.initialize(ctx=ctx)
         self.prediction.initialize(ctx=ctx)
+        self.train_steps = 0
 
 
     def initial_inference(self, image) -> NetworkOutput:
@@ -848,7 +849,7 @@ class Network():
 
     def training_steps(self) -> int:
         # How many steps / batches the network has been trained for.
-        return 0
+        return self.train_steps
 
     def save_network(self, file_name):
         self.representation.save_parameters('network/' + file_name + '.r.ckpt')
@@ -1081,6 +1082,7 @@ def train_network(config: MuZeroConfig, storage: SharedStorage,
       storage.save_network(i, network)
     batch = replay_buffer.sample_batch(config.num_unroll_steps, config.td_steps)
     update_weights(trainer, cross_entropy_loss, mse_loss, network, batch, config.weight_decay, ctx=ctx)
+    network.train_steps += 1
   storage.save_network(config.training_steps, network)
 
 def update_weights(optimizer: opt.Optimizer, cross_entropy_loss, mse_loss, network: Network, batch,
