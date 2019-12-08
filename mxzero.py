@@ -22,6 +22,7 @@ import pickle
 import uuid
 import os
 import time
+import string
 
 from mxnet import nd, metric, optimizer as opt, lr_scheduler, gpu, cpu, autograd
 from mxnet.gluon import nn, loss, Trainer
@@ -259,7 +260,7 @@ def make_board_game_config(action_space_size: int, max_moves: int,
       num_simulations=400,
       batch_size=64,
       td_steps=max_moves,  # Always use Monte Carlo return.
-      num_actors=6,
+      num_actors=8,
       lr_init=lr_init,
       lr_decay_steps=400e3,
       visit_softmax_temperature_fn=visit_softmax_temperature,
@@ -283,7 +284,7 @@ def make_shogi_config() -> MuZeroConfig:
 
 def make_c_config() -> MuZeroConfig:
   return make_board_game_config(
-    action_space_size=128, max_moves=16, dirichlet_alpha=0.15, lr_init=0.1)
+    action_space_size=Environment.ACTIONS, max_moves=16, dirichlet_alpha=0.15, lr_init=0.1)
 
 def make_atari_config() -> MuZeroConfig:
 
@@ -380,7 +381,7 @@ class ActionHistory(object):
 class Environment(object):
   """The environment MuZero is interacting with."""
 
-  ACTIONS = 128
+  ACTIONS = len(string.printable)
   HISTORY = 8
   N = 16
 
@@ -397,7 +398,7 @@ class Environment(object):
 
   def step(self, action):
     self.seq.append(action)
-    w = ''.join([chr(c) for c in self.seq])
+    w = ''.join([string.printable[c] for c in self.seq])
     print(self.seq, w)
     if action != 0 and self.s.find(str.encode(w)) != -1:
       print('reward' , 1)
@@ -612,10 +613,10 @@ class Representation(nn.Block):
         shared_output.add(nn.Dense(Environment.ACTIONS))
 
         self.net = shared_output
-        self.embedding = nd.random.normal(0, 0.1, shape=[8,128], ctx=self.ctx)
+        self.embedding = nd.random.normal(0, 0.1, shape=[8,Environment.ACTIONS], ctx=self.ctx)
 
     def forward(self, x):
-        return self.net(nd.Embedding(nd.ndarray.array(x, ctx=self.ctx), self.embedding, input_dim=Environment.HISTORY, output_dim=128))
+        return self.net(nd.Embedding(nd.ndarray.array(x, ctx=self.ctx), self.embedding, input_dim=Environment.HISTORY, output_dim=Environment.ACTIONS))
 
 
 class Prediction(nn.Block):
@@ -1079,57 +1080,91 @@ def update_weights(optimizer: opt.Optimizer, cross_entropy_loss, mse_loss, netwo
         # Initial step, from the real observation.
         value, reward, policy_logits, hidden_state = network.initial_inference(
             image)
-        prediction = (1.0, value, reward, policy_logits)
+        predictions = [(1.0, value, reward, policy_logits)]
 
         # for prediction, target in zip(predictions, targets[0]):
-        gradient_scale, value, reward, policy_logits = prediction
-        target_value, target_reward, target_policy = targets[0]
+        # gradient_scale, value, reward, policy_logits = prediction
+        # target_value, target_reward, target_policy = targets[0]
 
-        logits = [policy_logits[a].asnumpy()[0] for a in Environment.get_actions()]
+        # logits = [policy_logits[a].asnumpy()[0] for a in Environment.get_actions()]
         # print(logits)
         # print(target_policy)
-        l = mse_loss(value, nd.array(target_value, ctx=ctx)) + mse_loss(reward, nd.array(target_reward, ctx=ctx)) + \
-            cross_entropy_loss(
-                nd.array(logits, ctx=ctx),
-                nd.array(target_policy, ctx=ctx))
-
-    l.backward(retain_graph=True)
-    optimizer[0].step(image.shape[0])
+        # l = mse_loss(value, nd.array(target_value, ctx=ctx)) + mse_loss(reward, nd.array(target_reward, ctx=ctx)) + \
+        #     cross_entropy_loss(
+        #         nd.array(logits, ctx=ctx),
+        #         nd.array(target_policy, ctx=ctx))
+    #
+    # l.backward(retain_graph=True)
+    # optimizer[0].step(image.shape[0])
 
     # print(actions)
-    for i, action in enumerate(actions):
-        with autograd.record():
+
+        # with autograd.record():
+        for i, action in enumerate(actions):
         # Recurrent steps, from action and previous hidden state.
           value, reward, policy_logits, hidden_state = network.recurrent_inference(
               hidden_state, action)
-          prediction = (1.0 / len(actions), value, reward, policy_logits)
+          predictions.append((1.0 / len(actions), value, reward, policy_logits))
 
           # hidden_state = tf.scale_gradient(hidden_state, 0.5)
 
-        # for prediction, target in zip(predictions, targets):
+        values = None
+        target_values = []
+        rewards = None
+        target_rewards = []
+        logits = None
+        target_policies = None
+        for prediction, target in zip(predictions[:-1], targets[:-1]):
           gradient_scale, value, reward, policy_logits = prediction
-          target_value, target_reward, target_policy = targets[i]
+          target_value, target_reward, target_policy = target
 
-          logits = [policy_logits[a].asnumpy()[0] for a in Environment.get_actions()]
-          # print(target_policy)
-          l = mse_loss(value, nd.array(target_value, ctx=ctx)) + mse_loss(reward, nd.array(target_reward, ctx=ctx)) + \
+          if values is not None:
+              values = nd.concat(values, value, dim=0)
+          else:
+              values = value
+          target_values.append(target_value)
+
+          if rewards is not None:
+              rewards = nd.concat(rewards, reward, dim=0)
+          else:
+              rewards = reward
+          target_rewards.append(target_reward)
+
+          if logits is not None:
+            pl = None
+            for a in Environment.get_actions():
+                if pl is not None:
+                    pl = nd.concat(pl, policy_logits[a], dim=0)
+                else:
+                    pl = policy_logits[a]
+            logits = nd.concat(logits, pl, dim=0)
+          else:
+              pl = None
+              for a in Environment.get_actions():
+                  if pl is not None:
+                      pl = nd.concat(pl, policy_logits[a], dim=0)
+                  else:
+                      pl = policy_logits[a]
+              logits = pl
+
+          if target_policies is not None:
+              target_policies = nd.concat(target_policies, nd.array(target_policy, ctx), dim=0)
+          else:
+              target_policies = nd.array(target_policy, ctx)
+
+        # print('target_values', target_values)
+        # print('values',values)
+        target_values = nd.array(target_values, ctx)
+        target_rewards = nd.array(target_rewards, ctx=ctx)
+        l = mse_loss(values, target_values) + mse_loss(rewards, target_rewards) + \
             cross_entropy_loss(
                 nd.array(logits, ctx=ctx),
-                nd.array(target_policy, ctx=ctx))
-        l.backward(retain_graph=True)
-        for o in optimizer[1:]:
-            o.step(image.shape[0], ignore_stale_grad    =True)
-              # nd.mean(nd.power((nd.array(value) - nd.array(target_value)),2))
-              # nd.mean(nd.power((reward - target_reward),2)) +
-              # cross_entropy_loss(
-              #     nd.array([policy_logits[a] for a in Environment.get_actions()]),
-              #     nd.array(target_policy)))
+                nd.array(target_policies, ctx=ctx))
 
-          # loss += tf.scale_gradient(l, gradient_scale)
-          # if loss_ is None:
-          #   loss_ = l
-          # else:
-          #   loss_ += l
+    l.backward(retain_graph=True)
+    for o in optimizer:
+        o.step(image.shape[0], ignore_stale_grad    =True)
+
 
         # for weights in network.get_weights():
         #     loss_ += weight_decay * loss.L2Loss(weights)
